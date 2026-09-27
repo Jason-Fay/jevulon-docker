@@ -1,0 +1,80 @@
+# JEVULON VII (JVII) control plane — Docker Compose (runbook: server/deploy/README.md).
+name: jevulon-vii
+#
+# Loopback/proxy posture — identical to the systemd + nginx deployment:
+#   * the Bun plane binds 127.0.0.1:8787 inside the shared network namespace (code-enforced in
+#     server/main.ts — it is never reachable directly);
+#   * the `proxy` service shares that namespace and is the only ingress (nginx carrying the caps
+#     from server/deploy/nginx-api.conf: 64 KB bodies, 30 r/s per-IP, 30 s read timeout);
+#   * the host publishes 127.0.0.1:8787 → the proxy, so an existing host nginx vhost with
+#     `proxy_pass http://127.0.0.1:8787` (nginx-api.conf) works unchanged.
+#
+# Secrets live in ./.env (cp env.example .env && chmod 600 .env) — never in this file.
+# Hardening mirrors the systemd unit: unprivileged uid 1000, read-only root filesystem, zero
+# capabilities, no-new-privileges, 512 MB memory cap (MemoryMax=512M), restart always.
+
+services:
+  control-plane:
+    image: cxdegxd/jevulon-vii-control-plane:latest
+    build:
+      context: ../../..
+      dockerfile: server/deploy/docker/Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      CONTROL_PLANE_ENC_KEY: ${CONTROL_PLANE_ENC_KEY:?set CONTROL_PLANE_ENC_KEY in .env}
+      SENTINEL_TOKENS: ${SENTINEL_TOKENS:?set SENTINEL_TOKENS in .env}
+      # Contract #5 deployment data paths (image defaults; explicit here).
+      SENTINEL_DATA_DIR: /var/lib/swarm-sentinel/triggers
+      SENTINEL_CORPUS_DIR: /var/lib/swarm-sentinel/corpus
+      # Explicit no-contribution: enterprise data never feeds the shared corpus (default: 1).
+      SENTINEL_NO_CONTRIBUTION: ${SENTINEL_NO_CONTRIBUTION:-1}
+      PORT: "8787"
+      JEV_ENDPOINT: ${JEV_ENDPOINT:-https://drex.nace.ai/v1/systemone}
+      JEV_MODEL: ${JEV_MODEL:-drex-latest}
+      JEV_API_KEY: ${JEV_API_KEY:-}
+    volumes:
+      - corpus:/var/lib/swarm-sentinel/corpus
+      - triggers:/var/lib/swarm-sentinel/triggers
+    tmpfs:
+      # PrivateTmp analogue. Options-string form: `mode=1777` reaches the kernel as octal —
+      # the long-syntax `tmpfs: {mode: 1777}` gets mangled to 3361 and breaks non-root writes.
+      - /tmp:mode=1777
+    ports:
+      # Host loopback → the proxy sidecar (shared network namespace). Never publish publicly.
+      - "127.0.0.1:8787:8080"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    user: "1000:1000"
+    mem_limit: 512m
+    restart: unless-stopped
+
+  proxy:
+    image: cxdegxd/jevulon-vii-proxy:latest
+    build:
+      context: ../../..
+      dockerfile: server/deploy/docker/Dockerfile.proxy
+    network_mode: "service:control-plane"
+    depends_on:
+      - control-plane
+    tmpfs:
+      # Same options-string form as above (long-syntax mode gets mangled).
+      - /tmp:mode=1777
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    user: "1000:1000"
+    mem_limit: 128m
+    restart: unless-stopped
+
+volumes:
+  # Private corpus + trigger stores at the contract #5 paths; named volumes so the enterprise
+  # data survives container replacement.
+  corpus:
+  triggers:

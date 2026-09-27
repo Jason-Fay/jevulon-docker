@@ -1,0 +1,23 @@
+# Swarm Sentinel ingress proxy sidecar (server/deploy/README.md runbook).
+#
+# Build (from the repo root):
+#   docker build -f server/deploy/docker/Dockerfile.proxy -t swarm-sentinel-proxy:local .
+#
+# This is the containerized form of the nginx vhost in server/deploy/nginx-api.conf: it shares
+# the network namespace with the control-plane container and proxies 127.0.0.1:8787 (the Bun
+# plane binds loopback only) on :8080, carrying the same caps (64 KB bodies, 30 r/s per-IP).
+# TLS stays at your host nginx / cluster ingress — never at this layer.
+#
+# nginx-unprivileged: runs as a non-root user on :8080 with all temp paths under /tmp, so the
+# sidecar runs with a read-only root filesystem (mirrors ProtectSystem=strict in the unit).
+ARG NGINX_TAG=1.27-alpine
+FROM nginxinc/nginx-unprivileged:${NGINX_TAG}
+
+COPY server/deploy/docker/nginx-sidecar.conf /etc/nginx/conf.d/default.conf
+
+USER 1000:1000
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
+  CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1
